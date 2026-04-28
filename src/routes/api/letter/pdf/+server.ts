@@ -3,10 +3,12 @@ import {
 	PDFDocument,
 	PDFFont,
 	PDFPage,
+	StandardFonts,
 	rgb,
 	type Color
 } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { LetterPdfPayload, LetterVariant } from '$lib/types';
@@ -70,33 +72,151 @@ function sanitizeFileName(value: string): string {
 	return cleaned || 'nabidka-odkupu';
 }
 
+function stripDiacritics(value: string): string {
+	return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+function safeText(value: string, canUseDiacritics: boolean): string {
+	if (canUseDiacritics) return value;
+
+	return stripDiacritics(value)
+		.replaceAll('č', 'c')
+		.replaceAll('ď', 'd')
+		.replaceAll('ě', 'e')
+		.replaceAll('ň', 'n')
+		.replaceAll('ř', 'r')
+		.replaceAll('š', 's')
+		.replaceAll('ť', 't')
+		.replaceAll('ů', 'u')
+		.replaceAll('ž', 'z')
+		.replaceAll('Č', 'C')
+		.replaceAll('Ď', 'D')
+		.replaceAll('Ě', 'E')
+		.replaceAll('Ň', 'N')
+		.replaceAll('Ř', 'R')
+		.replaceAll('Š', 'S')
+		.replaceAll('Ť', 'T')
+		.replaceAll('Ů', 'U')
+		.replaceAll('Ž', 'Z')
+		.split('')
+		.filter((character) => character.charCodeAt(0) <= 127)
+		.join('');
+}
+
+async function readFirstExistingFile(paths: string[]): Promise<Uint8Array | null> {
+	for (const filePath of paths) {
+		if (!existsSync(filePath)) continue;
+
+		const buffer = await readFile(filePath);
+		return new Uint8Array(buffer);
+	}
+
+	return null;
+}
+
 async function loadFonts(pdfDoc: PDFDocument) {
-	pdfDoc.registerFontkit(fontkit as unknown as Parameters<typeof pdfDoc.registerFontkit>[0]);
+	const cwd = process.cwd();
 
-	const regularPath = path.join(
-		process.cwd(),
-		'node_modules',
-		'@fontsource',
-		'noto-sans',
-		'files',
-		'noto-sans-latin-ext-400-normal.woff'
-	);
+	const regularCandidates = [
+		path.join(
+			cwd,
+			'node_modules',
+			'@fontsource',
+			'noto-sans',
+			'files',
+			'noto-sans-latin-ext-400-normal.woff2'
+		),
+		path.join(
+			cwd,
+			'node_modules',
+			'@fontsource',
+			'noto-sans',
+			'files',
+			'noto-sans-latin-ext-400-normal.woff'
+		),
+		path.join(
+			cwd,
+			'node_modules',
+			'@fontsource',
+			'noto-sans',
+			'files',
+			'noto-sans-latin-400-normal.woff2'
+		),
+		path.join(
+			cwd,
+			'node_modules',
+			'@fontsource',
+			'noto-sans',
+			'files',
+			'noto-sans-latin-400-normal.woff'
+		)
+	];
 
-	const boldPath = path.join(
-		process.cwd(),
-		'node_modules',
-		'@fontsource',
-		'noto-sans',
-		'files',
-		'noto-sans-latin-ext-700-normal.woff'
-	);
+	const boldCandidates = [
+		path.join(
+			cwd,
+			'node_modules',
+			'@fontsource',
+			'noto-sans',
+			'files',
+			'noto-sans-latin-ext-700-normal.woff2'
+		),
+		path.join(
+			cwd,
+			'node_modules',
+			'@fontsource',
+			'noto-sans',
+			'files',
+			'noto-sans-latin-ext-700-normal.woff'
+		),
+		path.join(
+			cwd,
+			'node_modules',
+			'@fontsource',
+			'noto-sans',
+			'files',
+			'noto-sans-latin-700-normal.woff2'
+		),
+		path.join(
+			cwd,
+			'node_modules',
+			'@fontsource',
+			'noto-sans',
+			'files',
+			'noto-sans-latin-700-normal.woff'
+		)
+	];
 
-	const [regularBytes, boldBytes] = await Promise.all([readFile(regularPath), readFile(boldPath)]);
+	try {
+		pdfDoc.registerFontkit(fontkit as unknown as Parameters<typeof pdfDoc.registerFontkit>[0]);
 
-	const regularFont = await pdfDoc.embedFont(regularBytes, { subset: true });
-	const boldFont = await pdfDoc.embedFont(boldBytes, { subset: true });
+		const [regularBytes, boldBytes] = await Promise.all([
+			readFirstExistingFile(regularCandidates),
+			readFirstExistingFile(boldCandidates)
+		]);
 
-	return { regularFont, boldFont };
+		if (regularBytes && boldBytes) {
+			const regularFont = await pdfDoc.embedFont(regularBytes, { subset: true });
+			const boldFont = await pdfDoc.embedFont(boldBytes, { subset: true });
+
+			return {
+				regularFont,
+				boldFont,
+				canUseDiacritics: true
+			};
+		}
+	} catch {
+		// Fallback níže použije PDF standardní fonty bez diakritiky.
+	}
+
+	const regularFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
+	const boldFont = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+
+	return {
+		regularFont,
+		boldFont,
+		canUseDiacritics: false
+	};
 }
 
 function createPage(pdfDoc: PDFDocument, variant: LetterVariant): PDFPage {
@@ -169,13 +289,16 @@ function getMargins(variant: LetterVariant) {
 	};
 }
 
-function drawHeader(ctx: PdfContext, payload: LetterPdfPayload) {
-	const title = 'Nezávazná nabídka odkupu pozemku';
-	const date = new Intl.DateTimeFormat('cs-CZ', {
-		day: 'numeric',
-		month: 'long',
-		year: 'numeric'
-	}).format(new Date());
+function drawHeader(ctx: PdfContext, payload: LetterPdfPayload, canUseDiacritics: boolean) {
+	const title = safeText('Nezávazná nabídka odkupu pozemku', canUseDiacritics);
+	const date = safeText(
+		new Intl.DateTimeFormat('cs-CZ', {
+			day: 'numeric',
+			month: 'long',
+			year: 'numeric'
+		}).format(new Date()),
+		canUseDiacritics
+	);
 
 	if (ctx.variant === 'classic') {
 		ctx.page.drawText(title, {
@@ -205,7 +328,7 @@ function drawHeader(ctx: PdfContext, payload: LetterPdfPayload) {
 	}
 
 	if (ctx.variant === 'modern') {
-		ctx.page.drawText('NABÍDKA', {
+		ctx.page.drawText('NABIDKA', {
 			x: ctx.marginLeft,
 			y: A4_HEIGHT - 62,
 			size: 9,
@@ -229,12 +352,12 @@ function drawHeader(ctx: PdfContext, payload: LetterPdfPayload) {
 			color: COLORS.gray
 		});
 
-		drawInfoBox(ctx, payload, A4_HEIGHT - 178, COLORS.white, COLORS.blue);
+		drawInfoBox(ctx, payload, A4_HEIGHT - 178, COLORS.white, COLORS.blue, canUseDiacritics);
 
 		return;
 	}
 
-	ctx.page.drawText('Soukromá nabídka odkupu', {
+	ctx.page.drawText(safeText('Soukromá nabídka odkupu', canUseDiacritics), {
 		x: ctx.marginLeft,
 		y: A4_HEIGHT - 82,
 		size: 10,
@@ -258,7 +381,7 @@ function drawHeader(ctx: PdfContext, payload: LetterPdfPayload) {
 		color: COLORS.gray
 	});
 
-	drawInfoBox(ctx, payload, A4_HEIGHT - 202, rgb(1, 0.98, 0.93), COLORS.gold);
+	drawInfoBox(ctx, payload, A4_HEIGHT - 202, rgb(1, 0.98, 0.93), COLORS.gold, canUseDiacritics);
 }
 
 function drawInfoBox(
@@ -266,7 +389,8 @@ function drawInfoBox(
 	payload: LetterPdfPayload,
 	y: number,
 	background: Color,
-	accent: Color
+	accent: Color,
+	canUseDiacritics: boolean
 ) {
 	const x = ctx.marginLeft;
 	const width = A4_WIDTH - ctx.marginLeft - ctx.marginRight;
@@ -282,7 +406,7 @@ function drawInfoBox(
 		borderWidth: 0.8
 	});
 
-	ctx.page.drawText('Pozemek', {
+	ctx.page.drawText(safeText('Pozemek', canUseDiacritics), {
 		x: x + 14,
 		y: y + 32,
 		size: 8,
@@ -290,7 +414,12 @@ function drawInfoBox(
 		color: COLORS.gray
 	});
 
-	const parcelText = truncateText(payload.parcelSummary || 'Bez vybrané parcely', ctx.regularFont, 8.5, width - 28);
+	const parcelText = truncateText(
+		safeText(payload.parcelSummary || 'Bez vybrané parcely', canUseDiacritics),
+		ctx.regularFont,
+		8.5,
+		width - 28
+	);
 
 	ctx.page.drawText(parcelText, {
 		x: x + 14,
@@ -301,7 +430,7 @@ function drawInfoBox(
 	});
 
 	if (payload.offerAmount) {
-		const amountLabel = `Nabídka: ${payload.offerAmount}`;
+		const amountLabel = safeText(`Nabídka: ${payload.offerAmount}`, canUseDiacritics);
 		const amountWidth = ctx.boldFont.widthOfTextAtSize(amountLabel, 9);
 
 		ctx.page.drawText(amountLabel, {
@@ -319,11 +448,11 @@ function truncateText(text: string, font: PDFFont, size: number, maxWidth: numbe
 
 	let output = text;
 
-	while (output.length > 0 && font.widthOfTextAtSize(`${output}…`, size) > maxWidth) {
+	while (output.length > 0 && font.widthOfTextAtSize(`${output}...`, size) > maxWidth) {
 		output = output.slice(0, -1);
 	}
 
-	return `${output}…`;
+	return `${output}...`;
 }
 
 function ensureSpace(ctx: PdfContext, lineHeight: number) {
@@ -371,6 +500,7 @@ function wrapLine(text: string, font: PDFFont, size: number, maxWidth: number): 
 function drawWrappedText(
 	ctx: PdfContext,
 	text: string,
+	canUseDiacritics: boolean,
 	options?: {
 		size?: number;
 		lineHeight?: number;
@@ -385,7 +515,7 @@ function drawWrappedText(
 	const x = options?.x ?? ctx.marginLeft;
 	const maxWidth = options?.maxWidth ?? A4_WIDTH - ctx.marginLeft - ctx.marginRight;
 
-	const paragraphs = text.replace(/\r/g, '').split('\n');
+	const paragraphs = safeText(text, canUseDiacritics).replace(/\r/g, '').split('\n');
 
 	for (const paragraph of paragraphs) {
 		if (!paragraph.trim()) {
@@ -417,7 +547,8 @@ function drawFooter(pdfDoc: PDFDocument, font: PDFFont, variant: LetterVariant) 
 	pages.forEach((page, index) => {
 		const pageNumber = `${index + 1} / ${pages.length}`;
 
-		const color = variant === 'modern' ? COLORS.blue : variant === 'premium' ? COLORS.creamDark : COLORS.gray;
+		const color =
+			variant === 'modern' ? COLORS.blue : variant === 'premium' ? COLORS.creamDark : COLORS.gray;
 
 		page.drawText(pageNumber, {
 			x: A4_WIDTH - 84,
@@ -431,11 +562,11 @@ function drawFooter(pdfDoc: PDFDocument, font: PDFFont, variant: LetterVariant) 
 
 async function createPdf(payload: LetterPdfPayload): Promise<Uint8Array> {
 	const pdfDoc = await PDFDocument.create();
-	const { regularFont, boldFont } = await loadFonts(pdfDoc);
+	const { regularFont, boldFont, canUseDiacritics } = await loadFonts(pdfDoc);
 
-	pdfDoc.setTitle('Nezávazná nabídka odkupu pozemku');
-	pdfDoc.setAuthor(payload.buyerName || 'Katastr aplikace');
-	pdfDoc.setSubject(payload.parcelSummary || 'Nabídka odkupu pozemku');
+	pdfDoc.setTitle(safeText('Nezávazná nabídka odkupu pozemku', canUseDiacritics));
+	pdfDoc.setAuthor(safeText(payload.buyerName || 'Katastr aplikace', canUseDiacritics));
+	pdfDoc.setSubject(safeText(payload.parcelSummary || 'Nabídka odkupu pozemku', canUseDiacritics));
 	pdfDoc.setCreationDate(new Date());
 
 	const margins = getMargins(payload.variant);
@@ -453,9 +584,9 @@ async function createPdf(payload: LetterPdfPayload): Promise<Uint8Array> {
 		bottomMargin: margins.bottomMargin
 	};
 
-	drawHeader(ctx, payload);
+	drawHeader(ctx, payload, canUseDiacritics);
 
-	drawWrappedText(ctx, payload.letterText, {
+	drawWrappedText(ctx, payload.letterText, canUseDiacritics, {
 		size: payload.variant === 'premium' ? 10.2 : 10.5,
 		lineHeight: payload.variant === 'premium' ? 16.5 : 16,
 		color: COLORS.black
