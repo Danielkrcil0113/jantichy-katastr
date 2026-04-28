@@ -1,16 +1,5 @@
 import { error, type RequestHandler } from '@sveltejs/kit';
-import {
-	PDFDocument,
-	PDFFont,
-	PDFPage,
-	StandardFonts,
-	rgb,
-	type Color
-} from 'pdf-lib';
-import fontkit from '@pdf-lib/fontkit';
-import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
-import path from 'node:path';
+import { PDFDocument, PDFFont, PDFPage, StandardFonts, rgb, type Color } from 'pdf-lib';
 import type { LetterPdfPayload, LetterVariant } from '$lib/types';
 
 const A4_WIDTH = 595.28;
@@ -19,11 +8,9 @@ const A4_HEIGHT = 841.89;
 const COLORS = {
 	black: rgb(0.08, 0.09, 0.11),
 	gray: rgb(0.35, 0.39, 0.45),
-	lightGray: rgb(0.94, 0.95, 0.97),
 	blue: rgb(0.1, 0.32, 0.72),
 	blueDark: rgb(0.04, 0.17, 0.42),
 	blueLight: rgb(0.9, 0.95, 1),
-	green: rgb(0.05, 0.45, 0.25),
 	cream: rgb(0.99, 0.96, 0.9),
 	creamDark: rgb(0.52, 0.33, 0.12),
 	gold: rgb(0.82, 0.58, 0.2),
@@ -72,14 +59,10 @@ function sanitizeFileName(value: string): string {
 	return cleaned || 'nabidka-odkupu';
 }
 
-function stripDiacritics(value: string): string {
-	return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-}
-
-function safeText(value: string, canUseDiacritics: boolean): string {
-	if (canUseDiacritics) return value;
-
-	return stripDiacritics(value)
+function safeText(value: string): string {
+	return value
+		.normalize('NFD')
+		.replace(/[\u0300-\u036f]/g, '')
 		.replaceAll('č', 'c')
 		.replaceAll('ď', 'd')
 		.replaceAll('ě', 'e')
@@ -98,124 +81,29 @@ function safeText(value: string, canUseDiacritics: boolean): string {
 		.replaceAll('Ť', 'T')
 		.replaceAll('Ů', 'U')
 		.replaceAll('Ž', 'Z')
+		.replaceAll('–', '-')
+		.replaceAll('—', '-')
+		.replaceAll('„', '"')
+		.replaceAll('“', '"')
+		.replaceAll('”', '"')
+		.replaceAll('‚', "'")
+		.replaceAll('‘', "'")
+		.replaceAll('’', "'")
 		.split('')
-		.filter((character) => character.charCodeAt(0) <= 127)
+		.filter((character) => {
+			const code = character.charCodeAt(0);
+			return code === 10 || code === 13 || code === 9 || (code >= 32 && code <= 126);
+		})
 		.join('');
 }
 
-async function readFirstExistingFile(paths: string[]): Promise<Uint8Array | null> {
-	for (const filePath of paths) {
-		if (!existsSync(filePath)) continue;
-
-		const buffer = await readFile(filePath);
-		return new Uint8Array(buffer);
-	}
-
-	return null;
-}
-
 async function loadFonts(pdfDoc: PDFDocument) {
-	const cwd = process.cwd();
-
-	const regularCandidates = [
-		path.join(
-			cwd,
-			'node_modules',
-			'@fontsource',
-			'noto-sans',
-			'files',
-			'noto-sans-latin-ext-400-normal.woff2'
-		),
-		path.join(
-			cwd,
-			'node_modules',
-			'@fontsource',
-			'noto-sans',
-			'files',
-			'noto-sans-latin-ext-400-normal.woff'
-		),
-		path.join(
-			cwd,
-			'node_modules',
-			'@fontsource',
-			'noto-sans',
-			'files',
-			'noto-sans-latin-400-normal.woff2'
-		),
-		path.join(
-			cwd,
-			'node_modules',
-			'@fontsource',
-			'noto-sans',
-			'files',
-			'noto-sans-latin-400-normal.woff'
-		)
-	];
-
-	const boldCandidates = [
-		path.join(
-			cwd,
-			'node_modules',
-			'@fontsource',
-			'noto-sans',
-			'files',
-			'noto-sans-latin-ext-700-normal.woff2'
-		),
-		path.join(
-			cwd,
-			'node_modules',
-			'@fontsource',
-			'noto-sans',
-			'files',
-			'noto-sans-latin-ext-700-normal.woff'
-		),
-		path.join(
-			cwd,
-			'node_modules',
-			'@fontsource',
-			'noto-sans',
-			'files',
-			'noto-sans-latin-700-normal.woff2'
-		),
-		path.join(
-			cwd,
-			'node_modules',
-			'@fontsource',
-			'noto-sans',
-			'files',
-			'noto-sans-latin-700-normal.woff'
-		)
-	];
-
-	try {
-		pdfDoc.registerFontkit(fontkit as unknown as Parameters<typeof pdfDoc.registerFontkit>[0]);
-
-		const [regularBytes, boldBytes] = await Promise.all([
-			readFirstExistingFile(regularCandidates),
-			readFirstExistingFile(boldCandidates)
-		]);
-
-		if (regularBytes && boldBytes) {
-			const regularFont = await pdfDoc.embedFont(regularBytes, { subset: true });
-			const boldFont = await pdfDoc.embedFont(boldBytes, { subset: true });
-
-			return {
-				regularFont,
-				boldFont,
-				canUseDiacritics: true
-			};
-		}
-	} catch {
-		// Fallback níže použije PDF standardní fonty bez diakritiky.
-	}
-
 	const regularFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
 	const boldFont = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
 
 	return {
 		regularFont,
-		boldFont,
-		canUseDiacritics: false
+		boldFont
 	};
 }
 
@@ -289,16 +177,19 @@ function getMargins(variant: LetterVariant) {
 	};
 }
 
-function drawHeader(ctx: PdfContext, payload: LetterPdfPayload, canUseDiacritics: boolean) {
-	const title = safeText('Nezávazná nabídka odkupu pozemku', canUseDiacritics);
-	const date = safeText(
+function getFormattedDate(): string {
+	return safeText(
 		new Intl.DateTimeFormat('cs-CZ', {
 			day: 'numeric',
 			month: 'long',
 			year: 'numeric'
-		}).format(new Date()),
-		canUseDiacritics
+		}).format(new Date())
 	);
+}
+
+function drawHeader(ctx: PdfContext, payload: LetterPdfPayload) {
+	const title = safeText('Nezavazna nabidka odkupu pozemku');
+	const date = getFormattedDate();
 
 	if (ctx.variant === 'classic') {
 		ctx.page.drawText(title, {
@@ -352,12 +243,12 @@ function drawHeader(ctx: PdfContext, payload: LetterPdfPayload, canUseDiacritics
 			color: COLORS.gray
 		});
 
-		drawInfoBox(ctx, payload, A4_HEIGHT - 178, COLORS.white, COLORS.blue, canUseDiacritics);
+		drawInfoBox(ctx, payload, A4_HEIGHT - 178, COLORS.white, COLORS.blue);
 
 		return;
 	}
 
-	ctx.page.drawText(safeText('Soukromá nabídka odkupu', canUseDiacritics), {
+	ctx.page.drawText(safeText('Soukroma nabidka odkupu'), {
 		x: ctx.marginLeft,
 		y: A4_HEIGHT - 82,
 		size: 10,
@@ -381,7 +272,7 @@ function drawHeader(ctx: PdfContext, payload: LetterPdfPayload, canUseDiacritics
 		color: COLORS.gray
 	});
 
-	drawInfoBox(ctx, payload, A4_HEIGHT - 202, rgb(1, 0.98, 0.93), COLORS.gold, canUseDiacritics);
+	drawInfoBox(ctx, payload, A4_HEIGHT - 202, rgb(1, 0.98, 0.93), COLORS.gold);
 }
 
 function drawInfoBox(
@@ -389,8 +280,7 @@ function drawInfoBox(
 	payload: LetterPdfPayload,
 	y: number,
 	background: Color,
-	accent: Color,
-	canUseDiacritics: boolean
+	accent: Color
 ) {
 	const x = ctx.marginLeft;
 	const width = A4_WIDTH - ctx.marginLeft - ctx.marginRight;
@@ -406,7 +296,7 @@ function drawInfoBox(
 		borderWidth: 0.8
 	});
 
-	ctx.page.drawText(safeText('Pozemek', canUseDiacritics), {
+	ctx.page.drawText(safeText('Pozemek'), {
 		x: x + 14,
 		y: y + 32,
 		size: 8,
@@ -415,7 +305,7 @@ function drawInfoBox(
 	});
 
 	const parcelText = truncateText(
-		safeText(payload.parcelSummary || 'Bez vybrané parcely', canUseDiacritics),
+		safeText(payload.parcelSummary || 'Bez vybrane parcely'),
 		ctx.regularFont,
 		8.5,
 		width - 28
@@ -430,7 +320,7 @@ function drawInfoBox(
 	});
 
 	if (payload.offerAmount) {
-		const amountLabel = safeText(`Nabídka: ${payload.offerAmount}`, canUseDiacritics);
+		const amountLabel = safeText(`Nabidka: ${payload.offerAmount}`);
 		const amountWidth = ctx.boldFont.widthOfTextAtSize(amountLabel, 9);
 
 		ctx.page.drawText(amountLabel, {
@@ -500,7 +390,6 @@ function wrapLine(text: string, font: PDFFont, size: number, maxWidth: number): 
 function drawWrappedText(
 	ctx: PdfContext,
 	text: string,
-	canUseDiacritics: boolean,
 	options?: {
 		size?: number;
 		lineHeight?: number;
@@ -515,7 +404,7 @@ function drawWrappedText(
 	const x = options?.x ?? ctx.marginLeft;
 	const maxWidth = options?.maxWidth ?? A4_WIDTH - ctx.marginLeft - ctx.marginRight;
 
-	const paragraphs = safeText(text, canUseDiacritics).replace(/\r/g, '').split('\n');
+	const paragraphs = safeText(text).replace(/\r/g, '').split('\n');
 
 	for (const paragraph of paragraphs) {
 		if (!paragraph.trim()) {
@@ -562,11 +451,11 @@ function drawFooter(pdfDoc: PDFDocument, font: PDFFont, variant: LetterVariant) 
 
 async function createPdf(payload: LetterPdfPayload): Promise<Uint8Array> {
 	const pdfDoc = await PDFDocument.create();
-	const { regularFont, boldFont, canUseDiacritics } = await loadFonts(pdfDoc);
+	const { regularFont, boldFont } = await loadFonts(pdfDoc);
 
-	pdfDoc.setTitle(safeText('Nezávazná nabídka odkupu pozemku', canUseDiacritics));
-	pdfDoc.setAuthor(safeText(payload.buyerName || 'Katastr aplikace', canUseDiacritics));
-	pdfDoc.setSubject(safeText(payload.parcelSummary || 'Nabídka odkupu pozemku', canUseDiacritics));
+	pdfDoc.setTitle(safeText('Nezavazna nabidka odkupu pozemku'));
+	pdfDoc.setAuthor(safeText(payload.buyerName || 'Katastr aplikace'));
+	pdfDoc.setSubject(safeText(payload.parcelSummary || 'Nabidka odkupu pozemku'));
 	pdfDoc.setCreationDate(new Date());
 
 	const margins = getMargins(payload.variant);
@@ -584,9 +473,9 @@ async function createPdf(payload: LetterPdfPayload): Promise<Uint8Array> {
 		bottomMargin: margins.bottomMargin
 	};
 
-	drawHeader(ctx, payload, canUseDiacritics);
+	drawHeader(ctx, payload);
 
-	drawWrappedText(ctx, payload.letterText, canUseDiacritics, {
+	drawWrappedText(ctx, payload.letterText, {
 		size: payload.variant === 'premium' ? 10.2 : 10.5,
 		lineHeight: payload.variant === 'premium' ? 16.5 : 16,
 		color: COLORS.black
@@ -603,22 +492,22 @@ export const POST: RequestHandler = async ({ request }) => {
 	try {
 		body = await request.json();
 	} catch {
-		error(400, 'Neplatný JSON v požadavku.');
+		error(400, 'Neplatny JSON v pozadavku.');
 	}
 
 	if (!isRecord(body)) {
-		error(400, 'Neplatná data pro PDF.');
+		error(400, 'Neplatna data pro PDF.');
 	}
 
 	const variant = getVariant(body.variant);
 	const letterText = getString(body.letterText).trim();
 
 	if (!letterText) {
-		error(400, 'Chybí text dopisu.');
+		error(400, 'Chybi text dopisu.');
 	}
 
 	if (letterText.length > 12000) {
-		error(400, 'Text dopisu je příliš dlouhý.');
+		error(400, 'Text dopisu je prilis dlouhy.');
 	}
 
 	const payload: LetterPdfPayload = {
@@ -634,15 +523,18 @@ export const POST: RequestHandler = async ({ request }) => {
 	try {
 		const pdfBytes = await createPdf(payload);
 
-		return new Response(Buffer.from(pdfBytes), {
-			headers: {
-				'Content-Type': 'application/pdf',
-				'Content-Disposition': `attachment; filename="${payload.fileName}.pdf"`,
-				'Cache-Control': 'no-store'
-			}
-		});
+const responseBody = new ArrayBuffer(pdfBytes.byteLength);
+new Uint8Array(responseBody).set(pdfBytes);
+
+return new Response(responseBody, {
+	headers: {
+		'Content-Type': 'application/pdf',
+		'Content-Disposition': `attachment; filename="${payload.fileName}.pdf"`,
+		'Cache-Control': 'no-store'
+	}
+});
 	} catch (err) {
-		const message = err instanceof Error ? err.message : 'PDF se nepodařilo vygenerovat.';
+		const message = err instanceof Error ? err.message : 'PDF se nepodarilo vygenerovat.';
 		error(500, message);
 	}
 };
