@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { browser } from '$app/environment';
+	import { onDestroy } from 'svelte';
 	import type {
 		GeoPosition,
 		LetterDraftData,
@@ -42,13 +44,21 @@
 	let isGettingLocation = $state(false);
 	let isFindingParcel = $state(false);
 	let isGeneratingPdf = $state(false);
+	let isGeneratingPreview = $state(false);
 
 	let errorMessage = $state('');
 	let copyMessage = $state('');
 	let pdfMessage = $state('');
+	let previewError = $state('');
 
 	let radiusMeters = $state(25);
 	let pdfVariant = $state<LetterVariant>('classic');
+	let previewPdfUrl = $state<string | null>(null);
+
+	let previewDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+	let previewAbortController: AbortController | null = null;
+	let activePreviewObjectUrl: string | null = null;
+	let lastPreviewKey = '';
 
 	let form = $state<LetterDraftData>({
 		recipientName: '',
@@ -65,6 +75,39 @@
 	let selectedParcel = $derived(
 		lookup?.parcels.find((parcel) => parcel.id === selectedParcelId) ?? lookup?.parcels[0] ?? null
 	);
+
+	let letterText = $derived(getLetterText());
+	let parcelSummary = $derived(getParcelText(selectedParcel));
+
+	$effect(() => {
+		if (!browser) return;
+
+		const previewKey = JSON.stringify({
+			variant: pdfVariant,
+			letterText,
+			parcelSummary,
+			recipientName: form.recipientName,
+			buyerName: form.buyerName,
+			offerAmount: form.offerAmount,
+			fileName: getPdfFileName()
+		});
+
+		schedulePdfPreview(previewKey);
+	});
+
+	onDestroy(() => {
+		if (previewDebounceTimer) {
+			clearTimeout(previewDebounceTimer);
+		}
+
+		if (previewAbortController) {
+			previewAbortController.abort();
+		}
+
+		if (activePreviewObjectUrl) {
+			URL.revokeObjectURL(activePreviewObjectUrl);
+		}
+	});
 
 	function formatNumber(value: number, digits = 6): string {
 		return new Intl.NumberFormat('cs-CZ', {
@@ -125,6 +168,7 @@
 		errorMessage = '';
 		copyMessage = '';
 		pdfMessage = '';
+		previewError = '';
 		lookup = null;
 		selectedParcelId = '';
 		isGettingLocation = true;
@@ -146,6 +190,7 @@
 		errorMessage = '';
 		copyMessage = '';
 		pdfMessage = '';
+		previewError = '';
 		selectedParcelId = '';
 
 		if (!position) {
@@ -223,7 +268,6 @@
 		const buyerEmail = form.buyerEmail.trim() || '[DOPLŇTE E-MAIL]';
 		const buyerPhone = form.buyerPhone.trim() || '[DOPLŇTE TELEFON]';
 		const offerAmount = form.offerAmount.trim() || '[DOPLŇTE NABÍZENOU ČÁSTKU]';
-		const parcelText = getParcelText(selectedParcel);
 		const message = form.customMessage.trim();
 
 		return `${recipientName}
@@ -236,7 +280,7 @@ Věc: Nezávazná nabídka odkupu pozemku
 
 Vážená paní, vážený pane,
 
-obracím se na Vás jako na vlastníka ${parcelText}.
+obracím se na Vás jako na vlastníka ${parcelSummary}.
 
 ${message}
 
@@ -253,13 +297,95 @@ ${buyerName}
 V ${today()}`;
 	}
 
-	let letterText = $derived(getLetterText());
-
 	function getPdfFileName(): string {
 		const parcelPart = selectedParcel?.parcelNumber.replace('/', '-') || 'pozemek';
 		const variantPart = pdfVariant;
 
 		return `nabidka-odkupu-${parcelPart}-${variantPart}`;
+	}
+
+	function getPdfPayload() {
+		return {
+			variant: pdfVariant,
+			letterText,
+			parcelSummary,
+			recipientName: form.recipientName,
+			buyerName: form.buyerName,
+			offerAmount: form.offerAmount,
+			fileName: getPdfFileName()
+		};
+	}
+
+	async function readPdfError(response: Response): Promise<string> {
+		const text = await response.text();
+
+		try {
+			const parsed = JSON.parse(text);
+			return parsed.message || 'PDF se nepodařilo vygenerovat.';
+		} catch {
+			return text || 'PDF se nepodařilo vygenerovat.';
+		}
+	}
+
+	function schedulePdfPreview(previewKey: string) {
+		if (previewKey === lastPreviewKey) return;
+
+		lastPreviewKey = previewKey;
+		previewError = '';
+
+		if (previewDebounceTimer) {
+			clearTimeout(previewDebounceTimer);
+		}
+
+		previewDebounceTimer = setTimeout(() => {
+			void generatePdfPreview();
+		}, 700);
+	}
+
+	async function generatePdfPreview() {
+		if (!browser) return;
+
+		if (previewAbortController) {
+			previewAbortController.abort();
+		}
+
+		previewAbortController = new AbortController();
+		isGeneratingPreview = true;
+		previewError = '';
+
+		try {
+			const response = await fetch('/api/letter/pdf', {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json'
+				},
+				body: JSON.stringify(getPdfPayload()),
+				signal: previewAbortController.signal
+			});
+
+			if (!response.ok) {
+				throw new Error(await readPdfError(response));
+			}
+
+			const blob = await response.blob();
+			const nextUrl = URL.createObjectURL(blob);
+
+			if (activePreviewObjectUrl) {
+				URL.revokeObjectURL(activePreviewObjectUrl);
+			}
+
+			activePreviewObjectUrl = nextUrl;
+			previewPdfUrl = nextUrl;
+		} catch (error) {
+			if (error instanceof DOMException && error.name === 'AbortError') {
+				return;
+			}
+
+			previewError =
+				error instanceof Error ? error.message : 'Náhled PDF se nepodařilo vygenerovat.';
+		} finally {
+			isGeneratingPreview = false;
+		}
 	}
 
 	async function copyLetter() {
@@ -286,26 +412,11 @@ V ${today()}`;
 				headers: {
 					'Content-Type': 'application/json'
 				},
-				body: JSON.stringify({
-					variant: pdfVariant,
-					letterText,
-					parcelSummary: getParcelText(selectedParcel),
-					recipientName: form.recipientName,
-					buyerName: form.buyerName,
-					offerAmount: form.offerAmount,
-					fileName: getPdfFileName()
-				})
+				body: JSON.stringify(getPdfPayload())
 			});
 
 			if (!response.ok) {
-				const text = await response.text();
-
-				try {
-					const parsed = JSON.parse(text);
-					throw new Error(parsed.message || 'PDF se nepodařilo vygenerovat.');
-				} catch {
-					throw new Error(text || 'PDF se nepodařilo vygenerovat.');
-				}
+				throw new Error(await readPdfError(response));
 			}
 
 			const blob = await response.blob();
@@ -338,18 +449,17 @@ V ${today()}`;
 </svelte:head>
 
 <main class="min-h-screen px-4 py-8 sm:px-6 lg:px-8">
-	<div class="mx-auto max-w-6xl">
+	<div class="mx-auto max-w-7xl">
 		<header class="mb-8">
 			<p class="mb-2 text-sm font-semibold uppercase tracking-wide text-blue-700">
-				REST API KN + PDF generátor
+				REST API KN + živý PDF náhled
 			</p>
 			<h1 class="text-3xl font-bold tracking-tight text-gray-950 sm:text-5xl">
 				Nabídka odkupu pozemku podle GPS
 			</h1>
 			<p class="mt-4 max-w-3xl text-base leading-7 text-gray-600">
 				Aplikace zjistí GPS polohu, najde kandidátní parcely přes backend a připraví dopis ve
-				třech grafických variantách. Vlastníka zatím doplňujeme ručně kvůli pravidlům pro osobní
-				údaje a automatizovaný přístup.
+				třech grafických variantách. PDF náhled se automaticky aktualizuje při změně formuláře.
 			</p>
 		</header>
 
@@ -360,7 +470,7 @@ V ${today()}`;
 			</div>
 		{/if}
 
-		<div class="grid gap-6 lg:grid-cols-[0.95fr_1.05fr]">
+		<div class="grid gap-6 xl:grid-cols-[0.75fr_1.25fr]">
 			<section class="space-y-6">
 				<div class="rounded-3xl border border-white/80 bg-white/85 p-6 shadow-sm backdrop-blur">
 					<div class="mb-4 flex items-start justify-between gap-4">
@@ -573,164 +683,206 @@ V ${today()}`;
 				</div>
 			</section>
 
-			<section class="rounded-3xl border border-white/80 bg-white/90 p-6 shadow-sm backdrop-blur">
-				<div class="mb-6">
-					<p class="text-sm font-semibold text-blue-700">Krok 3</p>
-					<h2 class="mt-1 text-xl font-bold text-gray-950">Vygenerovat dopis a PDF</h2>
-					<p class="mt-2 text-sm leading-6 text-gray-600">
-						Vlastníka zatím doplň ručně. Vybraná parcela se propíše do textu automaticky.
-					</p>
-				</div>
-
-				<div class="grid gap-4 sm:grid-cols-2">
-					<label class="block">
-						<span class="mb-1 block text-sm font-medium text-gray-700">Jméno vlastníka</span>
-						<input
-							bind:value={form.recipientName}
-							type="text"
-							placeholder="Jan Novák"
-							class="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
-						/>
-					</label>
-
-					<label class="block">
-						<span class="mb-1 block text-sm font-medium text-gray-700">Adresa vlastníka</span>
-						<input
-							bind:value={form.recipientAddress}
-							type="text"
-							placeholder="Ulice 123, 110 00 Praha"
-							class="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
-						/>
-					</label>
-
-					<label class="block">
-						<span class="mb-1 block text-sm font-medium text-gray-700">Tvoje jméno / firma</span>
-						<input
-							bind:value={form.buyerName}
-							type="text"
-							placeholder="Kupující s.r.o."
-							class="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
-						/>
-					</label>
-
-					<label class="block">
-						<span class="mb-1 block text-sm font-medium text-gray-700">Tvoje adresa</span>
-						<input
-							bind:value={form.buyerAddress}
-							type="text"
-							placeholder="Tvoje adresa"
-							class="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
-						/>
-					</label>
-
-					<label class="block">
-						<span class="mb-1 block text-sm font-medium text-gray-700">E-mail</span>
-						<input
-							bind:value={form.buyerEmail}
-							type="email"
-							placeholder="email@example.cz"
-							class="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
-						/>
-					</label>
-
-					<label class="block">
-						<span class="mb-1 block text-sm font-medium text-gray-700">Telefon</span>
-						<input
-							bind:value={form.buyerPhone}
-							type="tel"
-							placeholder="+420 777 123 456"
-							class="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
-						/>
-					</label>
-
-					<label class="block sm:col-span-2">
-						<span class="mb-1 block text-sm font-medium text-gray-700">Nabízená částka</span>
-						<input
-							bind:value={form.offerAmount}
-							type="text"
-							placeholder="např. 250 000 Kč"
-							class="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
-						/>
-					</label>
-
-					<label class="block sm:col-span-2">
-						<span class="mb-1 block text-sm font-medium text-gray-700">Vlastní text nabídky</span>
-						<textarea
-							bind:value={form.customMessage}
-							rows="5"
-							class="w-full resize-y rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm leading-6 outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
-						></textarea>
-					</label>
-				</div>
-
-				<div class="mt-6 rounded-2xl border border-gray-200 bg-gray-50 p-4">
-					<p class="mb-3 text-sm font-bold text-gray-950">Vyber grafickou variantu PDF</p>
-
-					<div class="grid gap-3 sm:grid-cols-3">
-						{#each letterVariants as variant (variant.id)}
-							<label
-								class={`cursor-pointer rounded-2xl border bg-white p-4 transition ${
-									pdfVariant === variant.id
-										? 'border-blue-500 ring-4 ring-blue-100'
-										: 'border-gray-200 hover:border-blue-300'
-								}`}
-							>
-								<div class="mb-3 flex items-center justify-between gap-2">
-									<input bind:group={pdfVariant} value={variant.id} type="radio" />
-									<span class="rounded-full bg-blue-50 px-2 py-1 text-[11px] font-bold text-blue-700">
-										{variant.badge}
-									</span>
-								</div>
-
-								<p class="font-semibold text-gray-950">{variant.title}</p>
-								<p class="mt-1 text-xs leading-5 text-gray-600">{variant.description}</p>
-							</label>
-						{/each}
+			<section class="space-y-6">
+				<div class="rounded-3xl border border-white/80 bg-white/90 p-6 shadow-sm backdrop-blur">
+					<div class="mb-6">
+						<p class="text-sm font-semibold text-blue-700">Krok 3</p>
+						<h2 class="mt-1 text-xl font-bold text-gray-950">Dopis a PDF</h2>
+						<p class="mt-2 text-sm leading-6 text-gray-600">
+							Vlastníka zatím doplň ručně. Vybraná parcela se propíše do textu automaticky.
+						</p>
 					</div>
-				</div>
 
-				<div class="mt-6">
-					<div class="mb-3 flex flex-wrap items-center justify-between gap-3">
-						<h3 class="text-base font-bold text-gray-950">Náhled textu dopisu</h3>
+					<div class="grid gap-4 sm:grid-cols-2">
+						<label class="block">
+							<span class="mb-1 block text-sm font-medium text-gray-700">Jméno vlastníka</span>
+							<input
+								bind:value={form.recipientName}
+								type="text"
+								placeholder="Jan Novák"
+								class="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+							/>
+						</label>
 
-						<div class="flex gap-2">
-							<button
-								type="button"
-								onclick={copyLetter}
-								class="rounded-xl bg-gray-950 px-4 py-2 text-xs font-semibold text-white transition hover:bg-gray-800"
-							>
-								Kopírovat
-							</button>
+						<label class="block">
+							<span class="mb-1 block text-sm font-medium text-gray-700">Adresa vlastníka</span>
+							<input
+								bind:value={form.recipientAddress}
+								type="text"
+								placeholder="Ulice 123, 110 00 Praha"
+								class="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+							/>
+						</label>
 
-							<button
-								type="button"
-								onclick={downloadPdf}
-								disabled={isGeneratingPdf}
-								class="rounded-xl bg-blue-700 px-4 py-2 text-xs font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
-							>
-								{isGeneratingPdf ? 'Generuji PDF…' : 'Stáhnout PDF'}
-							</button>
+						<label class="block">
+							<span class="mb-1 block text-sm font-medium text-gray-700">Tvoje jméno / firma</span>
+							<input
+								bind:value={form.buyerName}
+								type="text"
+								placeholder="Kupující s.r.o."
+								class="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+							/>
+						</label>
+
+						<label class="block">
+							<span class="mb-1 block text-sm font-medium text-gray-700">Tvoje adresa</span>
+							<input
+								bind:value={form.buyerAddress}
+								type="text"
+								placeholder="Tvoje adresa"
+								class="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+							/>
+						</label>
+
+						<label class="block">
+							<span class="mb-1 block text-sm font-medium text-gray-700">E-mail</span>
+							<input
+								bind:value={form.buyerEmail}
+								type="email"
+								placeholder="email@example.cz"
+								class="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+							/>
+						</label>
+
+						<label class="block">
+							<span class="mb-1 block text-sm font-medium text-gray-700">Telefon</span>
+							<input
+								bind:value={form.buyerPhone}
+								type="tel"
+								placeholder="+420 777 123 456"
+								class="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+							/>
+						</label>
+
+						<label class="block sm:col-span-2">
+							<span class="mb-1 block text-sm font-medium text-gray-700">Nabízená částka</span>
+							<input
+								bind:value={form.offerAmount}
+								type="text"
+								placeholder="např. 250 000 Kč"
+								class="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+							/>
+						</label>
+
+						<label class="block sm:col-span-2">
+							<span class="mb-1 block text-sm font-medium text-gray-700">Vlastní text nabídky</span>
+							<textarea
+								bind:value={form.customMessage}
+								rows="5"
+								class="w-full resize-y rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm leading-6 outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+							></textarea>
+						</label>
+					</div>
+
+					<div class="mt-6 rounded-2xl border border-gray-200 bg-gray-50 p-4">
+						<p class="mb-3 text-sm font-bold text-gray-950">Vyber grafickou variantu PDF</p>
+
+						<div class="grid gap-3 sm:grid-cols-3">
+							{#each letterVariants as variant (variant.id)}
+								<label
+									class={`cursor-pointer rounded-2xl border bg-white p-4 transition ${
+										pdfVariant === variant.id
+											? 'border-blue-500 ring-4 ring-blue-100'
+											: 'border-gray-200 hover:border-blue-300'
+									}`}
+								>
+									<div class="mb-3 flex items-center justify-between gap-2">
+										<input bind:group={pdfVariant} value={variant.id} type="radio" />
+										<span class="rounded-full bg-blue-50 px-2 py-1 text-[11px] font-bold text-blue-700">
+											{variant.badge}
+										</span>
+									</div>
+
+									<p class="font-semibold text-gray-950">{variant.title}</p>
+									<p class="mt-1 text-xs leading-5 text-gray-600">{variant.description}</p>
+								</label>
+							{/each}
 						</div>
 					</div>
 
-					{#if copyMessage}
-						<p class="mb-3 rounded-xl bg-green-50 px-4 py-3 text-sm text-green-700">
-							{copyMessage}
-						</p>
+					<div class="mt-6">
+						<div class="mb-3 flex flex-wrap items-center justify-between gap-3">
+							<h3 class="text-base font-bold text-gray-950">Text dopisu</h3>
+
+							<div class="flex gap-2">
+								<button
+									type="button"
+									onclick={copyLetter}
+									class="rounded-xl bg-gray-950 px-4 py-2 text-xs font-semibold text-white transition hover:bg-gray-800"
+								>
+									Kopírovat
+								</button>
+
+								<button
+									type="button"
+									onclick={downloadPdf}
+									disabled={isGeneratingPdf}
+									class="rounded-xl bg-blue-700 px-4 py-2 text-xs font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
+								>
+									{isGeneratingPdf ? 'Generuji PDF…' : 'Stáhnout PDF'}
+								</button>
+							</div>
+						</div>
+
+						{#if copyMessage}
+							<p class="mb-3 rounded-xl bg-green-50 px-4 py-3 text-sm text-green-700">
+								{copyMessage}
+							</p>
+						{/if}
+
+						{#if pdfMessage}
+							<p class="mb-3 rounded-xl bg-green-50 px-4 py-3 text-sm text-green-700">
+								{pdfMessage}
+							</p>
+						{/if}
+
+						<textarea
+							readonly
+							value={letterText}
+							rows="14"
+							class="w-full rounded-2xl border border-gray-200 bg-gray-50 px-4 py-4 font-mono text-xs leading-6 text-gray-800 outline-none"
+						></textarea>
+					</div>
+				</div>
+
+				<div class="rounded-3xl border border-white/80 bg-white/90 p-6 shadow-sm backdrop-blur">
+					<div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+						<div>
+							<p class="text-sm font-semibold text-blue-700">Živý náhled</p>
+							<h2 class="mt-1 text-xl font-bold text-gray-950">PDF preview</h2>
+						</div>
+
+						<div class="flex items-center gap-2 text-xs text-gray-500">
+							{#if isGeneratingPreview}
+								<span class="inline-flex h-2 w-2 animate-pulse rounded-full bg-blue-600"></span>
+								Generuji náhled…
+							{:else}
+								<span class="inline-flex h-2 w-2 rounded-full bg-green-600"></span>
+								Aktuální
+							{/if}
+						</div>
+					</div>
+
+					{#if previewError}
+						<div class="mb-4 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+							<strong>Chyba náhledu:</strong>
+							{previewError}
+						</div>
 					{/if}
 
-					{#if pdfMessage}
-						<p class="mb-3 rounded-xl bg-green-50 px-4 py-3 text-sm text-green-700">
-							{pdfMessage}
-						</p>
+					{#if previewPdfUrl}
+						<div class="overflow-hidden rounded-2xl border border-gray-200 bg-gray-100 shadow-inner">
+							<iframe
+								title="Náhled PDF dopisu"
+								src={previewPdfUrl}
+								class="h-[820px] w-full bg-white"
+							></iframe>
+						</div>
+					{:else}
+						<div class="flex h-[500px] items-center justify-center rounded-2xl border border-dashed border-gray-300 bg-gray-50 p-8 text-center text-sm text-gray-500">
+							Připravuji první náhled PDF…
+						</div>
 					{/if}
-
-					<textarea
-						readonly
-						value={letterText}
-						rows="22"
-						class="w-full rounded-2xl border border-gray-200 bg-gray-50 px-4 py-4 font-mono text-xs leading-6 text-gray-800 outline-none"
-					></textarea>
 				</div>
 			</section>
 		</div>
