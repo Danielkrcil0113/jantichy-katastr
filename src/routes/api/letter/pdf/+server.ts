@@ -8,6 +8,7 @@ const A4_HEIGHT = 841.89;
 const COLORS = {
 	black: rgb(0.08, 0.09, 0.11),
 	gray: rgb(0.35, 0.39, 0.45),
+	lightGray: rgb(0.94, 0.95, 0.97),
 	blue: rgb(0.1, 0.32, 0.72),
 	blueDark: rgb(0.04, 0.17, 0.42),
 	blueLight: rgb(0.9, 0.95, 1),
@@ -89,6 +90,7 @@ function safeText(value: string): string {
 		.replaceAll('‚', "'")
 		.replaceAll('‘', "'")
 		.replaceAll('’', "'")
+		.replaceAll('\t', '    ')
 		.split('')
 		.filter((character) => {
 			const code = character.charCodeAt(0);
@@ -121,9 +123,9 @@ function createPage(pdfDoc: PDFDocument, variant: LetterVariant): PDFPage {
 
 		page.drawRectangle({
 			x: 46,
-			y: A4_HEIGHT - 96,
+			y: A4_HEIGHT - 104,
 			width: A4_WIDTH - 46,
-			height: 96,
+			height: 104,
 			color: COLORS.blueLight
 		});
 	}
@@ -165,7 +167,7 @@ function getMargins(variant: LetterVariant) {
 			marginLeft: 72,
 			marginRight: 72,
 			bottomMargin: 72,
-			startY: A4_HEIGHT - 190
+			startY: A4_HEIGHT - 185
 		};
 	}
 
@@ -185,176 +187,6 @@ function getFormattedDate(): string {
 			year: 'numeric'
 		}).format(new Date())
 	);
-}
-
-function drawHeader(ctx: PdfContext, payload: LetterPdfPayload) {
-	const title = safeText('Nezavazna nabidka odkupu pozemku');
-	const date = getFormattedDate();
-
-	if (ctx.variant === 'classic') {
-		ctx.page.drawText(title, {
-			x: ctx.marginLeft,
-			y: A4_HEIGHT - 70,
-			size: 18,
-			font: ctx.boldFont,
-			color: COLORS.black
-		});
-
-		ctx.page.drawText(date, {
-			x: A4_WIDTH - ctx.marginRight - ctx.regularFont.widthOfTextAtSize(date, 9),
-			y: A4_HEIGHT - 68,
-			size: 9,
-			font: ctx.regularFont,
-			color: COLORS.gray
-		});
-
-		ctx.page.drawLine({
-			start: { x: ctx.marginLeft, y: A4_HEIGHT - 92 },
-			end: { x: A4_WIDTH - ctx.marginRight, y: A4_HEIGHT - 92 },
-			thickness: 0.8,
-			color: COLORS.gray
-		});
-
-		return;
-	}
-
-	if (ctx.variant === 'modern') {
-		ctx.page.drawText('NABIDKA', {
-			x: ctx.marginLeft,
-			y: A4_HEIGHT - 62,
-			size: 9,
-			font: ctx.boldFont,
-			color: COLORS.blue
-		});
-
-		ctx.page.drawText(title, {
-			x: ctx.marginLeft,
-			y: A4_HEIGHT - 88,
-			size: 20,
-			font: ctx.boldFont,
-			color: COLORS.blueDark
-		});
-
-		ctx.page.drawText(date, {
-			x: ctx.marginLeft,
-			y: A4_HEIGHT - 112,
-			size: 9,
-			font: ctx.regularFont,
-			color: COLORS.gray
-		});
-
-		drawInfoBox(ctx, payload, A4_HEIGHT - 178, COLORS.white, COLORS.blue);
-
-		return;
-	}
-
-	ctx.page.drawText(safeText('Soukroma nabidka odkupu'), {
-		x: ctx.marginLeft,
-		y: A4_HEIGHT - 82,
-		size: 10,
-		font: ctx.boldFont,
-		color: COLORS.creamDark
-	});
-
-	ctx.page.drawText(title, {
-		x: ctx.marginLeft,
-		y: A4_HEIGHT - 112,
-		size: 21,
-		font: ctx.boldFont,
-		color: COLORS.black
-	});
-
-	ctx.page.drawText(date, {
-		x: ctx.marginLeft,
-		y: A4_HEIGHT - 135,
-		size: 9,
-		font: ctx.regularFont,
-		color: COLORS.gray
-	});
-
-	drawInfoBox(ctx, payload, A4_HEIGHT - 202, rgb(1, 0.98, 0.93), COLORS.gold);
-}
-
-function drawInfoBox(
-	ctx: PdfContext,
-	payload: LetterPdfPayload,
-	y: number,
-	background: Color,
-	accent: Color
-) {
-	const x = ctx.marginLeft;
-	const width = A4_WIDTH - ctx.marginLeft - ctx.marginRight;
-	const height = 54;
-
-	ctx.page.drawRectangle({
-		x,
-		y,
-		width,
-		height,
-		color: background,
-		borderColor: accent,
-		borderWidth: 0.8
-	});
-
-	ctx.page.drawText(safeText('Pozemek'), {
-		x: x + 14,
-		y: y + 32,
-		size: 8,
-		font: ctx.boldFont,
-		color: COLORS.gray
-	});
-
-	const parcelText = truncateText(
-		safeText(payload.parcelSummary || 'Bez vybrane parcely'),
-		ctx.regularFont,
-		8.5,
-		width - 28
-	);
-
-	ctx.page.drawText(parcelText, {
-		x: x + 14,
-		y: y + 17,
-		size: 8.5,
-		font: ctx.regularFont,
-		color: COLORS.black
-	});
-
-	if (payload.offerAmount) {
-		const amountLabel = safeText(`Nabidka: ${payload.offerAmount}`);
-		const amountWidth = ctx.boldFont.widthOfTextAtSize(amountLabel, 9);
-
-		ctx.page.drawText(amountLabel, {
-			x: x + width - amountWidth - 14,
-			y: y + 32,
-			size: 9,
-			font: ctx.boldFont,
-			color: accent
-		});
-	}
-}
-
-function truncateText(text: string, font: PDFFont, size: number, maxWidth: number): string {
-	if (font.widthOfTextAtSize(text, size) <= maxWidth) return text;
-
-	let output = text;
-
-	while (output.length > 0 && font.widthOfTextAtSize(`${output}...`, size) > maxWidth) {
-		output = output.slice(0, -1);
-	}
-
-	return `${output}...`;
-}
-
-function ensureSpace(ctx: PdfContext, lineHeight: number) {
-	if (ctx.y - lineHeight >= ctx.bottomMargin) return;
-
-	const margins = getMargins(ctx.variant);
-	ctx.page = createPage(ctx.pdfDoc, ctx.variant);
-	ctx.y = margins.startY;
-
-	if (ctx.variant !== 'classic') {
-		ctx.y = A4_HEIGHT - 92;
-	}
 }
 
 function wrapLine(text: string, font: PDFFont, size: number, maxWidth: number): string[] {
@@ -387,6 +219,220 @@ function wrapLine(text: string, font: PDFFont, size: number, maxWidth: number): 
 	return lines;
 }
 
+function truncateText(text: string, font: PDFFont, size: number, maxWidth: number): string {
+	if (font.widthOfTextAtSize(text, size) <= maxWidth) return text;
+
+	let output = text;
+
+	while (output.length > 0 && font.widthOfTextAtSize(`${output}...`, size) > maxWidth) {
+		output = output.slice(0, -1);
+	}
+
+	return `${output}...`;
+}
+
+function drawLimitedWrappedText(options: {
+	page: PDFPage;
+	text: string;
+	font: PDFFont;
+	x: number;
+	y: number;
+	size: number;
+	lineHeight: number;
+	maxWidth: number;
+	maxLines: number;
+	color: Color;
+}) {
+	const safe = safeText(options.text);
+	const lines = wrapLine(safe, options.font, options.size, options.maxWidth);
+	const visibleLines = lines.slice(0, options.maxLines);
+
+	if (lines.length > options.maxLines && visibleLines.length > 0) {
+		const lastIndex = visibleLines.length - 1;
+		visibleLines[lastIndex] = truncateText(
+			`${visibleLines[lastIndex]}...`,
+			options.font,
+			options.size,
+			options.maxWidth
+		);
+	}
+
+	visibleLines.forEach((line, index) => {
+		options.page.drawText(line, {
+			x: options.x,
+			y: options.y - index * options.lineHeight,
+			size: options.size,
+			font: options.font,
+			color: options.color
+		});
+	});
+}
+
+function drawInfoBox(
+	ctx: PdfContext,
+	payload: LetterPdfPayload,
+	y: number,
+	background: Color,
+	accent: Color
+): number {
+	const x = ctx.marginLeft;
+	const width = A4_WIDTH - ctx.marginLeft - ctx.marginRight;
+	const height = 76;
+
+	ctx.page.drawRectangle({
+		x,
+		y,
+		width,
+		height,
+		color: background,
+		borderColor: accent,
+		borderWidth: 0.8
+	});
+
+	ctx.page.drawText(safeText('Pozemek'), {
+		x: x + 14,
+		y: y + height - 21,
+		size: 8,
+		font: ctx.boldFont,
+		color: COLORS.gray
+	});
+
+	if (payload.offerAmount) {
+		const amountLabel = safeText(`Nabidka: ${payload.offerAmount}`);
+		const amountWidth = ctx.boldFont.widthOfTextAtSize(amountLabel, 8.5);
+
+		ctx.page.drawText(amountLabel, {
+			x: x + width - amountWidth - 14,
+			y: y + height - 21,
+			size: 8.5,
+			font: ctx.boldFont,
+			color: accent
+		});
+	}
+
+	drawLimitedWrappedText({
+		page: ctx.page,
+		text: payload.parcelSummary || 'Bez vybrane parcely',
+		font: ctx.regularFont,
+		x: x + 14,
+		y: y + height - 40,
+		size: 8.2,
+		lineHeight: 11,
+		maxWidth: width - 28,
+		maxLines: 3,
+		color: COLORS.black
+	});
+
+	return y;
+}
+
+function drawHeader(ctx: PdfContext, payload: LetterPdfPayload) {
+	const title = safeText('Nezavazna nabidka odkupu pozemku');
+	const date = getFormattedDate();
+
+	if (ctx.variant === 'classic') {
+		ctx.page.drawText(title, {
+			x: ctx.marginLeft,
+			y: A4_HEIGHT - 70,
+			size: 18,
+			font: ctx.boldFont,
+			color: COLORS.black
+		});
+
+		ctx.page.drawText(date, {
+			x: A4_WIDTH - ctx.marginRight - ctx.regularFont.widthOfTextAtSize(date, 9),
+			y: A4_HEIGHT - 68,
+			size: 9,
+			font: ctx.regularFont,
+			color: COLORS.gray
+		});
+
+		ctx.page.drawLine({
+			start: { x: ctx.marginLeft, y: A4_HEIGHT - 92 },
+			end: { x: A4_WIDTH - ctx.marginRight, y: A4_HEIGHT - 92 },
+			thickness: 0.8,
+			color: COLORS.gray
+		});
+
+		ctx.y = A4_HEIGHT - 125;
+		return;
+	}
+
+	if (ctx.variant === 'modern') {
+		ctx.page.drawText('NABIDKA', {
+			x: ctx.marginLeft,
+			y: A4_HEIGHT - 62,
+			size: 9,
+			font: ctx.boldFont,
+			color: COLORS.blue
+		});
+
+		ctx.page.drawText(title, {
+			x: ctx.marginLeft,
+			y: A4_HEIGHT - 90,
+			size: 20,
+			font: ctx.boldFont,
+			color: COLORS.blueDark
+		});
+
+		ctx.page.drawText(date, {
+			x: ctx.marginLeft,
+			y: A4_HEIGHT - 115,
+			size: 9,
+			font: ctx.regularFont,
+			color: COLORS.gray
+		});
+
+		const boxY = A4_HEIGHT - 215;
+		drawInfoBox(ctx, payload, boxY, COLORS.white, COLORS.blue);
+
+		ctx.y = boxY - 34;
+		return;
+	}
+
+	ctx.page.drawText(safeText('Soukroma nabidka odkupu'), {
+		x: ctx.marginLeft,
+		y: A4_HEIGHT - 82,
+		size: 10,
+		font: ctx.boldFont,
+		color: COLORS.creamDark
+	});
+
+	ctx.page.drawText(title, {
+		x: ctx.marginLeft,
+		y: A4_HEIGHT - 112,
+		size: 21,
+		font: ctx.boldFont,
+		color: COLORS.black
+	});
+
+	ctx.page.drawText(date, {
+		x: ctx.marginLeft,
+		y: A4_HEIGHT - 138,
+		size: 9,
+		font: ctx.regularFont,
+		color: COLORS.gray
+	});
+
+	const boxY = A4_HEIGHT - 236;
+	drawInfoBox(ctx, payload, boxY, rgb(1, 0.98, 0.93), COLORS.gold);
+
+	ctx.y = boxY - 36;
+}
+
+function ensureSpace(ctx: PdfContext, lineHeight: number) {
+	if (ctx.y - lineHeight >= ctx.bottomMargin) return;
+
+	const margins = getMargins(ctx.variant);
+	ctx.page = createPage(ctx.pdfDoc, ctx.variant);
+
+	ctx.y = margins.startY;
+
+	if (ctx.variant !== 'classic') {
+		ctx.y = A4_HEIGHT - 94;
+	}
+}
+
 function drawWrappedText(
 	ctx: PdfContext,
 	text: string,
@@ -408,7 +454,7 @@ function drawWrappedText(
 
 	for (const paragraph of paragraphs) {
 		if (!paragraph.trim()) {
-			ctx.y -= lineHeight * 0.7;
+			ctx.y -= lineHeight * 0.65;
 			continue;
 		}
 
@@ -523,16 +569,16 @@ export const POST: RequestHandler = async ({ request }) => {
 	try {
 		const pdfBytes = await createPdf(payload);
 
-const responseBody = new ArrayBuffer(pdfBytes.byteLength);
-new Uint8Array(responseBody).set(pdfBytes);
+		const responseBody = new ArrayBuffer(pdfBytes.byteLength);
+		new Uint8Array(responseBody).set(pdfBytes);
 
-return new Response(responseBody, {
-	headers: {
-		'Content-Type': 'application/pdf',
-		'Content-Disposition': `attachment; filename="${payload.fileName}.pdf"`,
-		'Cache-Control': 'no-store'
-	}
-});
+		return new Response(responseBody, {
+			headers: {
+				'Content-Type': 'application/pdf',
+				'Content-Disposition': `attachment; filename="${payload.fileName}.pdf"`,
+				'Cache-Control': 'no-store'
+			}
+		});
 	} catch (err) {
 		const message = err instanceof Error ? err.message : 'PDF se nepodarilo vygenerovat.';
 		error(500, message);
