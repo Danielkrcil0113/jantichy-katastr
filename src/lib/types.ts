@@ -50,3 +50,15 @@ export type LetterDraftData = {
 	offerAmount: string;
 	customMessage: string;
 };
+
+export type LetterVariant = 'classic' | 'modern' | 'premium';
+
+export type LetterPdfPayload = {
+	variant: LetterVariant;
+	letterText: string;
+	parcelSummary: string;
+	recipientName: string;
+	buyerName: string;
+	offerAmount: string;
+	fileName: string;
+};

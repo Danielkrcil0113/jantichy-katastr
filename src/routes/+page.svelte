@@ -2,9 +2,38 @@
 	import type {
 		GeoPosition,
 		LetterDraftData,
+		LetterVariant,
 		ParcelCandidate,
 		ParcelLookupResponse
 	} from '$lib/types';
+
+	type LetterVariantOption = {
+		id: LetterVariant;
+		title: string;
+		description: string;
+		badge: string;
+	};
+
+	const letterVariants: LetterVariantOption[] = [
+		{
+			id: 'classic',
+			title: 'Varianta 1',
+			description: 'Klasický úřední dopis, jednoduchý a seriózní.',
+			badge: 'Klasická'
+		},
+		{
+			id: 'modern',
+			title: 'Varianta 2',
+			description: 'Moderní obchodní vzhled s modrým pruhem a informační kartou.',
+			badge: 'Moderní'
+		},
+		{
+			id: 'premium',
+			title: 'Varianta 3',
+			description: 'Prémiovější dopis s jemným rámečkem a teplejším vzhledem.',
+			badge: 'Prémiová'
+		}
+	];
 
 	let position = $state<GeoPosition | null>(null);
 	let lookup = $state<ParcelLookupResponse | null>(null);
@@ -12,9 +41,14 @@
 
 	let isGettingLocation = $state(false);
 	let isFindingParcel = $state(false);
+	let isGeneratingPdf = $state(false);
+
 	let errorMessage = $state('');
 	let copyMessage = $state('');
-	let radiusMeters = $state(50);
+	let pdfMessage = $state('');
+
+	let radiusMeters = $state(25);
+	let pdfVariant = $state<LetterVariant>('classic');
 
 	let form = $state<LetterDraftData>({
 		recipientName: '',
@@ -90,6 +124,7 @@
 	async function handleGetLocation() {
 		errorMessage = '';
 		copyMessage = '';
+		pdfMessage = '';
 		lookup = null;
 		selectedParcelId = '';
 		isGettingLocation = true;
@@ -98,7 +133,7 @@
 			position = await getLocation();
 
 			if (position.accuracy) {
-				radiusMeters = Math.max(25, Math.min(Math.ceil(position.accuracy), 150));
+				radiusMeters = Math.max(5, Math.min(Math.ceil(position.accuracy), 35));
 			}
 		} catch (error) {
 			errorMessage = error instanceof Error ? error.message : 'Nepodařilo se zjistit polohu.';
@@ -110,6 +145,7 @@
 	async function handleFindParcel() {
 		errorMessage = '';
 		copyMessage = '';
+		pdfMessage = '';
 		selectedParcelId = '';
 
 		if (!position) {
@@ -219,14 +255,76 @@ V ${today()}`;
 
 	let letterText = $derived(getLetterText());
 
+	function getPdfFileName(): string {
+		const parcelPart = selectedParcel?.parcelNumber.replace('/', '-') || 'pozemek';
+		const variantPart = pdfVariant;
+
+		return `nabidka-odkupu-${parcelPart}-${variantPart}`;
+	}
+
 	async function copyLetter() {
 		copyMessage = '';
+		pdfMessage = '';
 
 		try {
 			await navigator.clipboard.writeText(letterText);
 			copyMessage = 'Dopis zkopírován do schránky.';
 		} catch {
 			copyMessage = 'Kopírování se nepodařilo. Označ text ručně a zkopíruj ho.';
+		}
+	}
+
+	async function downloadPdf() {
+		errorMessage = '';
+		copyMessage = '';
+		pdfMessage = '';
+		isGeneratingPdf = true;
+
+		try {
+			const response = await fetch('/api/letter/pdf', {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json'
+				},
+				body: JSON.stringify({
+					variant: pdfVariant,
+					letterText,
+					parcelSummary: getParcelText(selectedParcel),
+					recipientName: form.recipientName,
+					buyerName: form.buyerName,
+					offerAmount: form.offerAmount,
+					fileName: getPdfFileName()
+				})
+			});
+
+			if (!response.ok) {
+				const text = await response.text();
+
+				try {
+					const parsed = JSON.parse(text);
+					throw new Error(parsed.message || 'PDF se nepodařilo vygenerovat.');
+				} catch {
+					throw new Error(text || 'PDF se nepodařilo vygenerovat.');
+				}
+			}
+
+			const blob = await response.blob();
+			const url = URL.createObjectURL(blob);
+
+			const link = document.createElement('a');
+			link.href = url;
+			link.download = `${getPdfFileName()}.pdf`;
+			document.body.appendChild(link);
+			link.click();
+			link.remove();
+
+			URL.revokeObjectURL(url);
+
+			pdfMessage = 'PDF bylo vygenerováno a staženo.';
+		} catch (error) {
+			errorMessage = error instanceof Error ? error.message : 'PDF se nepodařilo vygenerovat.';
+		} finally {
+			isGeneratingPdf = false;
 		}
 	}
 </script>
@@ -243,15 +341,15 @@ V ${today()}`;
 	<div class="mx-auto max-w-6xl">
 		<header class="mb-8">
 			<p class="mb-2 text-sm font-semibold uppercase tracking-wide text-blue-700">
-				REST API KN + SvelteKit
+				REST API KN + PDF generátor
 			</p>
 			<h1 class="text-3xl font-bold tracking-tight text-gray-950 sm:text-5xl">
 				Nabídka odkupu pozemku podle GPS
 			</h1>
 			<p class="mt-4 max-w-3xl text-base leading-7 text-gray-600">
-				Aplikace zjistí GPS polohu, serverově převede souřadnice do S-JTSK, zavolá ČÚZK API
-				na vyhledání kandidátních parcel a připraví návrh dopisu. Vlastníka doplňujeme ručně,
-				protože veřejné REST API KN osobní údaje neposkytuje.
+				Aplikace zjistí GPS polohu, najde kandidátní parcely přes backend a připraví dopis ve
+				třech grafických variantách. Vlastníka zatím doplňujeme ručně kvůli pravidlům pro osobní
+				údaje a automatizovaný přístup.
 			</p>
 		</header>
 
@@ -342,13 +440,13 @@ V ${today()}`;
 						<input
 							bind:value={radiusMeters}
 							type="number"
-							min="25"
-							max="150"
+							min="5"
+							max="35"
 							step="5"
 							class="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
 						/>
 						<span class="mt-1 block text-xs text-gray-500">
-							Doporučení: 25–50 m při přesné GPS, až 150 m při horším signálu.
+							ČÚZK API omezuje plochu polygonu na 5000 m², proto používáme max. 35 m.
 						</span>
 					</label>
 
@@ -411,7 +509,7 @@ V ${today()}`;
 								<div class="rounded-2xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800">
 									<p class="font-semibold">Zprávy z API:</p>
 									<ul class="mt-2 list-disc space-y-1 pl-5">
-										{#each lookup.messages as message (message)}
+										{#each lookup.messages as message, index (message + index)}
 											<li>{message}</li>
 										{/each}
 									</ul>
@@ -467,7 +565,7 @@ V ${today()}`;
 								</div>
 							{:else}
 								<p class="rounded-2xl bg-gray-50 p-4 text-sm text-gray-600">
-									Nenašla se žádná parcela. Zkus větší radius nebo přesnější GPS pozici.
+									Nenašla se žádná parcela. Zkus přesnější GPS pozici.
 								</p>
 							{/if}
 						</div>
@@ -478,7 +576,7 @@ V ${today()}`;
 			<section class="rounded-3xl border border-white/80 bg-white/90 p-6 shadow-sm backdrop-blur">
 				<div class="mb-6">
 					<p class="text-sm font-semibold text-blue-700">Krok 3</p>
-					<h2 class="mt-1 text-xl font-bold text-gray-950">Vygenerovat dopis</h2>
+					<h2 class="mt-1 text-xl font-bold text-gray-950">Vygenerovat dopis a PDF</h2>
 					<p class="mt-2 text-sm leading-6 text-gray-600">
 						Vlastníka zatím doplň ručně. Vybraná parcela se propíše do textu automaticky.
 					</p>
@@ -565,21 +663,65 @@ V ${today()}`;
 					</label>
 				</div>
 
+				<div class="mt-6 rounded-2xl border border-gray-200 bg-gray-50 p-4">
+					<p class="mb-3 text-sm font-bold text-gray-950">Vyber grafickou variantu PDF</p>
+
+					<div class="grid gap-3 sm:grid-cols-3">
+						{#each letterVariants as variant (variant.id)}
+							<label
+								class={`cursor-pointer rounded-2xl border bg-white p-4 transition ${
+									pdfVariant === variant.id
+										? 'border-blue-500 ring-4 ring-blue-100'
+										: 'border-gray-200 hover:border-blue-300'
+								}`}
+							>
+								<div class="mb-3 flex items-center justify-between gap-2">
+									<input bind:group={pdfVariant} value={variant.id} type="radio" />
+									<span class="rounded-full bg-blue-50 px-2 py-1 text-[11px] font-bold text-blue-700">
+										{variant.badge}
+									</span>
+								</div>
+
+								<p class="font-semibold text-gray-950">{variant.title}</p>
+								<p class="mt-1 text-xs leading-5 text-gray-600">{variant.description}</p>
+							</label>
+						{/each}
+					</div>
+				</div>
+
 				<div class="mt-6">
-					<div class="mb-3 flex items-center justify-between gap-4">
-						<h3 class="text-base font-bold text-gray-950">Náhled dopisu</h3>
-						<button
-							type="button"
-							onclick={copyLetter}
-							class="rounded-xl bg-gray-950 px-4 py-2 text-xs font-semibold text-white transition hover:bg-gray-800"
-						>
-							Kopírovat
-						</button>
+					<div class="mb-3 flex flex-wrap items-center justify-between gap-3">
+						<h3 class="text-base font-bold text-gray-950">Náhled textu dopisu</h3>
+
+						<div class="flex gap-2">
+							<button
+								type="button"
+								onclick={copyLetter}
+								class="rounded-xl bg-gray-950 px-4 py-2 text-xs font-semibold text-white transition hover:bg-gray-800"
+							>
+								Kopírovat
+							</button>
+
+							<button
+								type="button"
+								onclick={downloadPdf}
+								disabled={isGeneratingPdf}
+								class="rounded-xl bg-blue-700 px-4 py-2 text-xs font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
+							>
+								{isGeneratingPdf ? 'Generuji PDF…' : 'Stáhnout PDF'}
+							</button>
+						</div>
 					</div>
 
 					{#if copyMessage}
 						<p class="mb-3 rounded-xl bg-green-50 px-4 py-3 text-sm text-green-700">
 							{copyMessage}
+						</p>
+					{/if}
+
+					{#if pdfMessage}
+						<p class="mb-3 rounded-xl bg-green-50 px-4 py-3 text-sm text-green-700">
+							{pdfMessage}
 						</p>
 					{/if}
 
